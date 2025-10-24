@@ -16,10 +16,6 @@ on:
   workflow_dispatch:
     branches:
 
-concurrency:
-  group: "ci-${{ github.ref }}"
-  cancel-in-progress: true
-
 name: CI
 
 jobs:
