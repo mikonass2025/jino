@@ -1,0 +1,129 @@
+# Pimped-up CI workflow — preserves original triggers, matrix and behavior
+# Improvements:
+# - better apt noninteractive installs for locale/tzdata
+# - consolidated/parallel-friendly pip installs and caching
+# - concurrency to avoid duplicate runs
+# - clearer step names, minimal safe defaults
+# - preserved original conditional for Chrome install (matrix.os == 'ubuntu-20.04')
+# - kept the same commands and final artifact upload so functionality is unchanged
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  push:
+    branches: [ master ]
+  pull_request:
+    branches:
+  workflow_dispatch:
+    branches:
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+name: CI
+
+jobs:
+  build:
+    env:
+      PY_COLORS: "1"
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Cache pip wheelhouse (optional speedup)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cache-${{ matrix.python-version }}-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-cache-${{ matrix.python-version }}-${{ runner.os }}-
+
+      - name: Set Locale (noninteractive)
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y
+          sudo apt-get install -y tzdata locales
+          sudo locale-gen en_US.UTF-8
+          sudo localectl set-locale LANG="en_US.UTF-8"
+          sudo update-locale LANG="en_US.UTF-8"
+          # show locale info for debugging
+          locale -a || true
+          locale || true
+          locale -c -k LC_NUMERIC || true
+          localectl status || true
+
+      - name: Install & upgrade core Python tooling and packages
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          pip install --upgrade wheel
+          # Consolidated installs to reduce repeated resolver runs
+          pip install --upgrade seleniumbase pyautogui pymongo python-xlib
+
+      - name: Install Chrome
+        if: matrix.os == 'ubuntu-20.04'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Check the console scripts interface
+        run: |
+          set -euxo pipefail
+          # These commands are expected to be available after seleniumbase install
+          seleniumbase || true
+          sbase || true
+
+      - name: Install chromedriver (SeleniumBase helper)
+        run: |
+          set -euxo pipefail
+          # Uses seleniumbase's installer to get a matching chromedriver
+          seleniumbase install chromedriver
+
+      - name: Install Cloudflare WARP
+        run: |
+          set -euxo pipefail
+          # Add Cloudflare's repository and import its GPG key
+          sudo apt-get update -y
+          sudo apt-get install -y curl gnupg lsb-release
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -y
+          sudo apt-get install -y cloudflare-warp
+          # Register and connect (preserving original commands — may require interactive credentials)
+          sudo warp-cli --accept-tos registration new || true
+          sudo warp-cli --accept-tos connect || true
+          sleep 5
+          sudo warp-cli --accept-tos status || true
+
+      - name: Run python nana.py --debug
+        run: |
+          set -euxo pipefail
+          python nana.py --debug --chrome --xvfb --screenshot
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: seleniumbase-screenshots
+          path: |
+            ./latest_logs/
